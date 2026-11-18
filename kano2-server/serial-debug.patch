@@ -1,0 +1,48 @@
+diff --git a/kano2-server/lib/serial_bridge.js b/kano2-server/lib/serial_bridge.js
+index 8dc9af5..f72b0fa 100644
+--- a/kano2-server/lib/serial_bridge.js
++++ b/kano2-server/lib/serial_bridge.js
+@@ -48,7 +48,7 @@ module.exports = function getOrCreateInstance(config) {
+     if (!serialBridge) {
+         serialBridge = new SerialBridge(config);
+         serialBridge.on('error', (detail) => {
+-            console.log('Serial bridge error', detail.stack);
++            console.log('Serial bridge error', (detail && detail.stack) || JSON.stringify(detail));
+         });
+     }
+     return serialBridge;
+diff --git a/kano2-server/vendor/kano2-shared-lib/lib/device-bus/channels/serial.js b/kano2-server/vendor/kano2-shared-lib/lib/device-bus/channels/serial.js
+index 85c9b3d..aa60f79 100644
+--- a/kano2-server/vendor/kano2-shared-lib/lib/device-bus/channels/serial.js
++++ b/kano2-server/vendor/kano2-shared-lib/lib/device-bus/channels/serial.js
+@@ -31,6 +31,8 @@ class SerialChannel extends EventEmitter {
+         this.closedByUser = false;
+         this.padLength = undefined;
+         this.reopenOnDisconnect = opts.reopenOnDisconnect !== false; // old library always reopened
++        // KANO_SERIAL_DEBUG=1 prints every message sent to / received from the MCU
++        this.debug = !!(opts.debug || process.env.KANO_SERIAL_DEBUG);
+ 
+         if (typeof opts.padLength === 'number' && opts.padLength > 0) {
+             this.padLength = opts.padLength;
+@@ -106,6 +108,10 @@ class SerialChannel extends EventEmitter {
+             payload = payload + ' '.repeat(this.padLength - (payload.length % this.padLength));
+         }
+ 
++        if (this.debug) {
++            console.log('[serial tx]', req.content.slice(0, 160));
++        }
++
+         this._writing = true;
+         this.port.write(payload, (err) => {
+             this._writing = false;
+@@ -167,6 +173,10 @@ class SerialChannel extends EventEmitter {
+         this.parser.on('data', (data) => {
+             let message;
+ 
++            if (this.debug) {
++                console.log('[serial rx]', String(data).slice(0, 300));
++            }
++
+             try {
+                 message = JSON.parse(data);
+             } catch (err) {
