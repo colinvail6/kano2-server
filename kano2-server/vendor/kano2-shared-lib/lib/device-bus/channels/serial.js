@@ -31,6 +31,8 @@ class SerialChannel extends EventEmitter {
         this.closedByUser = false;
         this.padLength = undefined;
         this.reopenOnDisconnect = opts.reopenOnDisconnect !== false; // old library always reopened
+        // KANO_SERIAL_DEBUG=1 prints every message sent to / received from the MCU
+        this.debug = !!(opts.debug || process.env.KANO_SERIAL_DEBUG);
 
         if (typeof opts.padLength === 'number' && opts.padLength > 0) {
             this.padLength = opts.padLength;
@@ -106,6 +108,10 @@ class SerialChannel extends EventEmitter {
             payload = payload + ' '.repeat(this.padLength - (payload.length % this.padLength));
         }
 
+        if (this.debug) {
+            console.log('[serial tx]', req.content.slice(0, 160));
+        }
+
         this._writing = true;
         this.port.write(payload, (err) => {
             this._writing = false;
@@ -166,6 +172,10 @@ class SerialChannel extends EventEmitter {
         console.log("Listening on " + this.device);
         this.parser.on('data', (data) => {
             let message;
+
+            if (this.debug) {
+                console.log('[serial rx]', String(data).slice(0, 300));
+            }
 
             try {
                 message = JSON.parse(data);

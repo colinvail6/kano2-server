@@ -48,7 +48,7 @@ module.exports = function getOrCreateInstance(config) {
     if (!serialBridge) {
         serialBridge = new SerialBridge(config);
         serialBridge.on('error', (detail) => {
-            console.log('Serial bridge error', detail.stack);
+            console.log('Serial bridge error', (detail && detail.stack) || JSON.stringify(detail));
         });
     }
     return serialBridge;
