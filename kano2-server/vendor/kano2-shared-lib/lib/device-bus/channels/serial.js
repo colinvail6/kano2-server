@@ -33,6 +33,13 @@ class SerialChannel extends EventEmitter {
         this.reopenOnDisconnect = opts.reopenOnDisconnect !== false; // old library always reopened
         // KANO_SERIAL_DEBUG=1 prints every message sent to / received from the MCU
         this.debug = !!(opts.debug || process.env.KANO_SERIAL_DEBUG);
+        // After a break the MCU needs time to reset its parser (pixelkit.py / pixelkit.hpp both sleep 2s here)
+        this.breakSettleMs = opts.breakSettleMs !== undefined ? opts.breakSettleMs : 2000;
+        // KANO_BREAK_SYNC=1: also send the 0x55 'U' sync byte after the break (what pixelkit.hpp does)
+        this.breakSync = !!(opts.breakSync || process.env.KANO_BREAK_SYNC);
+        this._holdWrites = false;
+        this._onIdle = null;
+        this._openFailures = 0;
 
         if (typeof opts.padLength === 'number' && opts.padLength > 0) {
             this.padLength = opts.padLength;
@@ -71,12 +78,16 @@ class SerialChannel extends EventEmitter {
 
         this.port.open((err) => {
             if (err) {
-                console.log("Failed to open serial connection");
-                console.log(err);
+                this._openFailures++;
+                if (this._openFailures === 1 || this._openFailures % 30 === 0) {
+                    console.log(`Failed to open serial connection ${this.device} (will keep retrying quietly):`, err.message);
+                }
                 if (this.reopenOnDisconnect && !this.closedByUser) {
-                    setTimeout(() => this._open(), REOPEN_DELAY_MS).unref();
+                    let delay = Math.min(REOPEN_DELAY_MS * Math.pow(2, Math.min(this._openFailures - 1, 5)), 30000);
+                    setTimeout(() => this._open(), delay).unref();
                 }
             } else {
+                this._openFailures = 0;
                 console.log(`Port to ${this.device} opened successfully`);
                 /* Dispatch any request that queued up before the port opened. */
                 this._dispatch();
@@ -97,7 +108,7 @@ class SerialChannel extends EventEmitter {
     }
 
     _dispatch () {
-        if (this._writing || !this.port.isOpen || this.q.length === 0) {
+        if (this._writing || this._holdWrites || !this.port.isOpen || this.q.length === 0) {
             return;
         }
 
@@ -116,6 +127,11 @@ class SerialChannel extends EventEmitter {
         this.port.write(payload, (err) => {
             this._writing = false;
             req.callback(err || null);
+            if (this._onIdle) {
+                let waiting = this._onIdle;
+                this._onIdle = null;
+                return waiting();
+            }
             setImmediate(() => this._dispatch());
         });
     }
@@ -136,7 +152,14 @@ class SerialChannel extends EventEmitter {
         this.port.once('open', onOpen);
     }
 
-    /* Hold the line in break condition for `duration` ms (the kit resets its serial parser). */
+    /*
+     * Hold the line in break condition for `duration` ms (the kit resets its serial parser).
+     *
+     * Writes are paused first and the message in flight is allowed to leave the UART completely:
+     * a break asserted mid-message cuts the first bytes off it and leaves the MCU's 227-byte block framing
+     * out of step ("Couldn't decode JSON", requests answered ~30s late). Queued messages go out only after
+     * the MCU has had `breakSettleMs` to recover.
+     */
     sendBreak (duration, callback) {
         callback = callback || function () {};
 
@@ -148,14 +171,49 @@ class SerialChannel extends EventEmitter {
             if (openErr) {
                 return callback(openErr);
             }
-            this.port.set({ brk: true }, (err) => {
-                if (err) {
-                    return callback(err);
-                }
-                setTimeout(() => {
-                    this.port.set({ brk: false }, (err2) => callback(err2 || null));
-                }, duration);
-            });
+            if (this._holdWrites) {
+                return callback(new Error('Break already in progress'));
+            }
+
+            this._holdWrites = true;
+
+            let release = (err) => {
+                this._holdWrites = false;
+                this._dispatch();
+                callback(err || null);
+            };
+
+            let settle = () => setTimeout(() => release(null), this.breakSettleMs);
+
+            let doBreak = () => {
+                this.port.drain((drainErr) => {
+                    if (drainErr) {
+                        return release(drainErr);
+                    }
+                    this.port.set({ brk: true }, (err) => {
+                        if (err) {
+                            return release(err);
+                        }
+                        setTimeout(() => {
+                            this.port.set({ brk: false }, (err2) => {
+                                if (err2) {
+                                    return release(err2);
+                                }
+                                if (this.breakSync) {
+                                    return this.port.write('U', (e) => e ? release(e) : this.port.drain(() => settle()));
+                                }
+                                settle();
+                            });
+                        }, duration);
+                    });
+                });
+            };
+
+            if (this._writing) {
+                this._onIdle = doBreak;
+            } else {
+                doBreak();
+            }
         });
     }
 

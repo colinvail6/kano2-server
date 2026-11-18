@@ -15,7 +15,9 @@ class RPCClient {
             if (entry) {
                 delete this.calls[response.id];
                 clearTimeout(entry.timer);
-                entry.callback(response.err, response.value);
+                // The Pixel Kit MCU replies with "error"; kano's own server code uses "err". Accept both.
+                let err = response.err != null ? response.err : (response.error != null ? response.error : null);
+                entry.callback(err, response.value);
             } else {
                 console.log("No callback found, " + response.id + " ignored.");
             }

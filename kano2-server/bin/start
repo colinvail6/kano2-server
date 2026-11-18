@@ -107,6 +107,8 @@ function main() {
             MonitorOTG(config).start((msg, rinfo) => {
                     modeManager.otgPlugCallback(msg, rinfo);
            });
+            // Enabling the watchdog earlier raced the startup serial break and got its message cut in half
+            WatchdogMonitor(config).start();
         });
 
     /*
@@ -148,7 +150,6 @@ function main() {
     FactoryReset(config).start(() => {
          modeManager.markReset();
     });
-    WatchdogMonitor(config).start();
 }
 
 main();
