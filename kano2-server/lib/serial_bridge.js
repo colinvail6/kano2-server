@@ -45,7 +45,7 @@ class SerialBridge {
         let attempts = 0,
             probe = () => {
                 attempts++;
-                this.client.call('serial-info', [], { timeout: PROBE_TIMEOUT_MS }, (err) => {
+                this.client.call('serial-info', [], { timeout: PROBE_TIMEOUT_MS, nudgeAfter: 150 }, (err) => {
                     if (err !== 'Request timed out') {
                         return callback(null);
                     }

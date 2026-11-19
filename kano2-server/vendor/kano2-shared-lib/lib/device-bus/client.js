@@ -3,9 +3,10 @@
 const { randomUUID } = require('crypto');
 
 const DEFAULT_TIMEOUT = 30000,
-      // The Pixel Kit MCU can sit on a request until more bytes arrive (see SerialChannel#nudge): if a request is
-      // still unanswered after this long, give it a push. Set opts.nudgeAfter = 0 on a call to disable.
-      NUDGE_AFTER_MS = 150,
+      // The Pixel Kit MCU can sit on a request until more bytes arrive (see SerialChannel#nudge). Pass opts.nudgeAfter (ms)
+      // on a call to push it if the answer is slow. Off by default: nudging every unanswered display frame was seen to
+      // upset the MCU's framing (periodic "Couldn't decode JSON").
+      NUDGE_AFTER_MS = 0,
       MAX_NUDGES = 3;
 
 class RPCClient {

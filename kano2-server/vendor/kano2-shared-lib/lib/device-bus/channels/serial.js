@@ -33,6 +33,8 @@ class SerialChannel extends EventEmitter {
         this.reopenOnDisconnect = opts.reopenOnDisconnect !== false; // old library always reopened
         // KANO_SERIAL_DEBUG=1 prints every message sent to / received from the MCU
         this.debug = !!(opts.debug || process.env.KANO_SERIAL_DEBUG);
+        // Character used to pad messages up to a multiple of padLength (the 2017 library used spaces; pixelkit.hpp uses NULs)
+        this.padChar = opts.padChar !== undefined ? opts.padChar : ' ';
         // After a break the MCU needs time to reset its parser (pixelkit.py / pixelkit.hpp both sleep 2s here)
         this.breakSettleMs = opts.breakSettleMs !== undefined ? opts.breakSettleMs : 2000;
         // KANO_BREAK_SYNC=1: also send the 0x55 'U' sync byte after the break (what pixelkit.hpp does)
@@ -116,7 +118,7 @@ class SerialChannel extends EventEmitter {
             payload = req.raw !== undefined ? req.raw : req.content + "\r\n";
 
         if (req.raw === undefined && this.padLength && payload.length % this.padLength > 0) {
-            payload = payload + ' '.repeat(this.padLength - (payload.length % this.padLength));
+            payload = payload + this.padChar.repeat(this.padLength - (payload.length % this.padLength));
         }
 
         if (this.debug) {
@@ -143,14 +145,14 @@ class SerialChannel extends EventEmitter {
      */
     nudge (count, callback) {
         count = count || 16;
-        this.q.unshift({ raw: ' '.repeat(count), callback: callback || function () {} });
+        this.q.unshift({ raw: this.padChar.repeat(count), callback: callback || function () {} });
         this._dispatch();
     }
 
     /* KANO_SERIAL_DEBUG trace. Display frames (grid-bmp) are only logged for the first few, there are 20 a second. */
     _traceTx (req) {
         if (req.raw !== undefined) {
-            return console.log(`[serial tx] <${req.raw.length} spaces>`);
+            return console.log(`[serial tx] <${req.raw.length} padding bytes>`);
         }
         let method = (/"method":"([^"]+)"/.exec(req.content) || [])[1];
         if (method === 'grid-bmp') {
