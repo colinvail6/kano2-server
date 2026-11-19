@@ -34,14 +34,14 @@ class SerialBridge {
     }
 
     /*
-     * After a break the Pixel Kit MCU loses the first few bytes of the first message it receives (5 on the hardware
-     * this was tested on), garbles it, and then sits on it until more data arrives - so the first request is answered
-     * ~30s late. pixelkit.py and pixelkit.hpp deal with it by sending their first command twice, 1s apart.
-     * Same idea here, with a harmless 'serial-info' probe: retry until the MCU answers (with a value OR an error).
+     * After a break the Pixel Kit MCU drops the first few bytes it receives (5 on the board this was tested on), and from
+     * then on only answers a request once more bytes arrive after it - which is why pixelkit.py / pixelkit.hpp send
+     * their first command twice, 1s apart. Instead: write a few spaces first (they are what gets dropped), then probe
+     * with the harmless 'serial-info'. The client nudges the MCU if the probe is not answered quickly.
      */
     _resync (callback) {
-        const MAX_ATTEMPTS = 6,
-              PROBE_TIMEOUT_MS = 1000;
+        const MAX_ATTEMPTS = 5,
+              PROBE_TIMEOUT_MS = 800;
         let attempts = 0,
             probe = () => {
                 attempts++;
@@ -57,7 +57,10 @@ class SerialBridge {
                 });
             };
 
-        probe();
+        if (typeof this.channel.nudge === 'function') {
+            this.channel.nudge(16);
+        }
+        setTimeout(probe, 50);
     }
 
     on () {

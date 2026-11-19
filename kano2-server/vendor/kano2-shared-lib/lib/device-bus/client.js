@@ -2,7 +2,11 @@
 
 const { randomUUID } = require('crypto');
 
-const DEFAULT_TIMEOUT = 30000;
+const DEFAULT_TIMEOUT = 30000,
+      // The Pixel Kit MCU can sit on a request until more bytes arrive (see SerialChannel#nudge): if a request is
+      // still unanswered after this long, give it a push. Set opts.nudgeAfter = 0 on a call to disable.
+      NUDGE_AFTER_MS = 150,
+      MAX_NUDGES = 3;
 
 class RPCClient {
     constructor (channel) {
@@ -15,6 +19,7 @@ class RPCClient {
             if (entry) {
                 delete this.calls[response.id];
                 clearTimeout(entry.timer);
+                clearTimeout(entry.nudgeTimer);
                 // The Pixel Kit MCU replies with "error"; kano's own server code uses "err". Accept both.
                 let err = response.err != null ? response.err : (response.error != null ? response.error : null);
                 entry.callback(err, response.value);
@@ -33,15 +38,29 @@ class RPCClient {
 
         let id = randomUUID(),
             request = { id: id, method: method, params: params.slice() },
-            entry = { callback: callback, timer: null },
-            timeout = opts.timeout || DEFAULT_TIMEOUT;
+            entry = { callback: callback, timer: null, nudgeTimer: null, nudges: 0 },
+            timeout = opts.timeout || DEFAULT_TIMEOUT,
+            nudgeAfter = opts.nudgeAfter !== undefined ? opts.nudgeAfter : NUDGE_AFTER_MS,
+            nudge = () => {
+                if (!this.calls[id] || entry.nudges >= MAX_NUDGES || typeof this.channel.nudge !== 'function') {
+                    return;
+                }
+                entry.nudges++;
+                this.channel.nudge();
+                entry.nudgeTimer = setTimeout(nudge, nudgeAfter);
+            };
 
         entry.timer = setTimeout(() => {
             if (this.calls[id]) {
                 delete this.calls[id];
+                clearTimeout(entry.nudgeTimer);
                 callback('Request timed out', null);
             }
         }, timeout);
+
+        if (nudgeAfter > 0) {
+            entry.nudgeTimer = setTimeout(nudge, nudgeAfter);
+        }
 
         this.calls[id] = entry;
 
@@ -49,6 +68,7 @@ class RPCClient {
             if (err && this.calls[id]) {
                 delete this.calls[id];
                 clearTimeout(entry.timer);
+                clearTimeout(entry.nudgeTimer);
                 callback(err);
             }
         });

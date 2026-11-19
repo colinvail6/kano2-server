@@ -113,14 +113,14 @@ class SerialChannel extends EventEmitter {
         }
 
         let req = this.q.shift(),
-            payload = req.content + "\r\n";
+            payload = req.raw !== undefined ? req.raw : req.content + "\r\n";
 
-        if (this.padLength && payload.length % this.padLength > 0) {
+        if (req.raw === undefined && this.padLength && payload.length % this.padLength > 0) {
             payload = payload + ' '.repeat(this.padLength - (payload.length % this.padLength));
         }
 
         if (this.debug) {
-            console.log('[serial tx]', req.content.slice(0, 160));
+            this._traceTx(req);
         }
 
         this._writing = true;
@@ -134,6 +134,48 @@ class SerialChannel extends EventEmitter {
             }
             setImmediate(() => this._dispatch());
         });
+    }
+
+    /*
+     * Push on the MCU: write `count` spaces. Spaces are the padding character, so the MCU ignores them as data, but they
+     * complete the 227-byte block it may be sitting on, which makes it answer a request it would otherwise hold until
+     * the next message arrives. The first bytes after a break are also dropped by the MCU, and spaces are what get dropped.
+     */
+    nudge (count, callback) {
+        count = count || 16;
+        this.q.unshift({ raw: ' '.repeat(count), callback: callback || function () {} });
+        this._dispatch();
+    }
+
+    /* KANO_SERIAL_DEBUG trace. Display frames (grid-bmp) are only logged for the first few, there are 20 a second. */
+    _traceTx (req) {
+        if (req.raw !== undefined) {
+            return console.log(`[serial tx] <${req.raw.length} spaces>`);
+        }
+        let method = (/"method":"([^"]+)"/.exec(req.content) || [])[1];
+        if (method === 'grid-bmp') {
+            this._frames = (this._frames || 0) + 1;
+            if (this._frames > 3) {
+                this._quietIds = this._quietIds || new Set();
+                this._quietIds.add((/"id":"([^"]+)"/.exec(req.content) || [])[1]);
+                if (this._frames === 4) {
+                    console.log('[serial] further grid-bmp frames are not logged');
+                }
+                return;
+            }
+        }
+        console.log('[serial tx]', req.content.slice(0, 160));
+    }
+
+    _traceRx (data) {
+        let text = String(data);
+        if (this._quietIds && this._quietIds.size) {
+            let id = (/"rpc-response","id":"([^"]+)"/.exec(text) || [])[1];
+            if (id && this._quietIds.delete(id)) {
+                return;
+            }
+        }
+        console.log('[serial rx]', text.slice(0, 300));
     }
 
     /* Run fn once the port is open (or fail after timeoutMs). */
@@ -232,7 +274,7 @@ class SerialChannel extends EventEmitter {
             let message;
 
             if (this.debug) {
-                console.log('[serial rx]', String(data).slice(0, 300));
+                this._traceRx(data);
             }
 
             try {
