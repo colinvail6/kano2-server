@@ -9,10 +9,11 @@ how many times each method was called in $MCU_SEEN (default /tmp/fakemcu-seen.js
 Note: a pty has no modem lines, so the server's serial break fails with 'Inappropriate ioctl'; that is expected here.
 """
 import os, pty, json, select, sys, time
+LOSSY = os.environ.get('FAKEMCU_LOSSY') == '1'   # lose the first 5 bytes of the first message and stall on it (real board, after a break)
 dur = float(sys.argv[1]) if len(sys.argv) > 1 else 40
 m, s = pty.openpty()
 print(os.ttyname(s), flush=True)
-buf = b''; seen = {}
+buf = b''; seen = {}; stalled = None
 def send(o): os.write(m, (json.dumps(o) + '\r\n').encode())
 t0 = time.time()
 while time.time() - t0 < dur:
@@ -24,6 +25,12 @@ while time.time() - t0 < dur:
         line, buf = buf.split(b'\r\n', 1)
         line = line.strip(b' \x00')
         if not line: continue
+        if LOSSY and not seen.get('_lossy'):
+            seen['_lossy'] = 1; stalled = line[5:]; continue          # first message: head lost, MCU waits for more data
+        if LOSSY and stalled is not None:
+            send({'type': 'event', 'name': 'error', 'detail': {'msg': "Couldn't decode JSON", 'ovf': '00000000'}})
+            send({'type': 'event', 'name': 'invalid-json', 'invalid': stalled.decode(errors='replace')})
+            stalled = None
         try: msg = json.loads(line)
         except Exception: continue
         if msg.get('type') != 'rpc-request': continue

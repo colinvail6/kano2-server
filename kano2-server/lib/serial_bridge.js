@@ -25,7 +25,39 @@ class SerialBridge {
 
     resetSerial (callback) {
         // send a break for 5ms
-        this.channel.sendBreak(5, callback);
+        this.channel.sendBreak(5, (err) => {
+            if (err) {
+                return callback(err);
+            }
+            this._resync(callback);
+        });
+    }
+
+    /*
+     * After a break the Pixel Kit MCU loses the first few bytes of the first message it receives (5 on the hardware
+     * this was tested on), garbles it, and then sits on it until more data arrives - so the first request is answered
+     * ~30s late. pixelkit.py and pixelkit.hpp deal with it by sending their first command twice, 1s apart.
+     * Same idea here, with a harmless 'serial-info' probe: retry until the MCU answers (with a value OR an error).
+     */
+    _resync (callback) {
+        const MAX_ATTEMPTS = 6,
+              PROBE_TIMEOUT_MS = 1000;
+        let attempts = 0,
+            probe = () => {
+                attempts++;
+                this.client.call('serial-info', [], { timeout: PROBE_TIMEOUT_MS }, (err) => {
+                    if (err !== 'Request timed out') {
+                        return callback(null);
+                    }
+                    if (attempts >= MAX_ATTEMPTS) {
+                        console.log(`MCU did not answer ${attempts} serial resync probes`);
+                        return callback(err);
+                    }
+                    probe();
+                });
+            };
+
+        probe();
     }
 
     on () {
