@@ -8,9 +8,9 @@
  *   2. sudo $(which node) tools/serial-align-test.js            # uses kit_device.serial_path from config.json
  *      (or pass the device: sudo $(which node) tools/serial-align-test.js /dev/ttyS2)
  *
- * Takes about a minute and leaves the display blank. Every row is one run: [break] -> [spacer bytes] ->
+ * Takes about 1.5 minutes and leaves the display blank. Every row is one run: [break] -> [spacer bytes] ->
  * 3 x serial-info, 1s apart -> 6 blank display frames, 100ms apart. Nothing is pushed or retried, so a slow answer
- * shows up as a slow answer. Paste the whole output back.
+ * shows up as a slow answer. The first clean variant is then run as a 10 second stream. Paste the whole output back.
  */
 const Serial = require('kano2-shared-lib/lib/device-bus/channels/serial'),
       Client = require('kano2-shared-lib/lib/device-bus/client'),
@@ -78,12 +78,35 @@ async function runVariant (v) {
     return ok ? v : null;
 }
 
+
+/* 10 seconds of display frames at 20 fps, like a running program: are they all answered, and how late? */
+async function streamTest (v) {
+    errors = 0;
+    ch.padChar = PAD[v.pad];
+    await new Promise((resolve) => ch.sendBreak(5, () => resolve()));
+    if (v.spacer) {
+        ch.nudge(v.spacer);
+    }
+    await sleep(150);
+
+    let calls = [];
+    for (let i = 0; i < 200; i++) {
+        calls.push(timedCall('grid-bmp', [{ map: BLANK_FRAME }]));
+        await sleep(50);
+    }
+    let lat = (await Promise.all(calls)).filter((x) => x !== null).sort((a, b) => a - b);
+    console.log(
+        `\nStream (${v.pad} padding, spacer ${v.spacer}): 200 frames at 20 fps -> answered ${lat.length}/200, ` +
+        `median ${lat[Math.floor(lat.length / 2)]} ms, 95th ${lat[Math.floor(lat.length * 0.95)]} ms, max ${lat[lat.length - 1]} ms, decode errors ${errors}`
+    );
+}
+
 (async () => {
     console.log(`Device ${device}. Waiting 6s for the MCU to settle...`);
     await sleep(6000);
 
-    let variants = [{ brk: false, pad: 'space', spacer: 0 }];
-    ['space', 'NUL'].forEach((pad) => [0, 1, 5, 16].forEach((spacer) => variants.push({ brk: true, pad: pad, spacer: spacer })));
+    let variants = [{ brk: false, pad: 'NUL', spacer: 0 }, { brk: true, pad: 'space', spacer: 1 }];
+    [0, 1, 2, 3, 4, 5, 8, 1, 1, 1].forEach((spacer) => variants.push({ brk: true, pad: 'NUL', spacer: spacer }));
 
     let good = [];
     for (let v of variants) {
@@ -91,6 +114,10 @@ async function runVariant (v) {
         if (r) {
             good.push(r);
         }
+    }
+
+    if (good.length) {
+        await streamTest(good[0]);
     }
 
     console.log('\nVariants where every answer was prompt and clean:');

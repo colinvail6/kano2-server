@@ -9,7 +9,7 @@ how many times each method was called in $MCU_SEEN (default /tmp/fakemcu-seen.js
 Note: a pty has no modem lines, so the server's serial break fails with 'Inappropriate ioctl'; that is expected here.
 
 FAKEMCU_BLOCKS=1 reproduces what the real board was seen doing after a serial break:
-  - it drops the first 5 bytes it receives, and
+  - it drops the first FAKEMCU_DROP (default 5) bytes it receives, and
   - it only parses its input when a whole 227-byte block has arrived, so every request is answered only once the
     first bytes of the NEXT message show up (or something else pushes the block through). The first message,
     having lost its head, is reported as 'Couldn't decode JSON'.
@@ -17,7 +17,8 @@ FAKEMCU_BLOCKS=1 reproduces what the real board was seen doing after a serial br
 import os, pty, json, select, sys, time
 
 BLOCKS = os.environ.get('FAKEMCU_BLOCKS') == '1'
-BLOCK, DROP = 227, 5
+BLOCK = 227
+DROP = int(os.environ.get('FAKEMCU_DROP', '5'))   # bytes the MCU drops after a break (the real board's alignment is found by the server)
 dur = float(sys.argv[1]) if len(sys.argv) > 1 else 40
 m, s = pty.openpty()
 print(os.ttyname(s), flush=True)

@@ -33,8 +33,10 @@ class SerialChannel extends EventEmitter {
         this.reopenOnDisconnect = opts.reopenOnDisconnect !== false; // old library always reopened
         // KANO_SERIAL_DEBUG=1 prints every message sent to / received from the MCU
         this.debug = !!(opts.debug || process.env.KANO_SERIAL_DEBUG);
-        // Character used to pad messages up to a multiple of padLength (the 2017 library used spaces; pixelkit.hpp uses NULs)
-        this.padChar = opts.padChar !== undefined ? opts.padChar : ' ';
+        // Character used to pad messages up to a multiple of padLength. The 2017 library used spaces, but on the board this
+        // was tested on, space padding left the MCU garbling the first message after a break; NUL padding (as in
+        // pixelkit.hpp) did not.
+        this.padChar = opts.padChar !== undefined ? opts.padChar : '\0';
         // After a break the MCU needs time to reset its parser (pixelkit.py / pixelkit.hpp both sleep 2s here)
         this.breakSettleMs = opts.breakSettleMs !== undefined ? opts.breakSettleMs : 2000;
         // KANO_BREAK_SYNC=1: also send the 0x55 'U' sync byte after the break (what pixelkit.hpp does)
@@ -139,9 +141,9 @@ class SerialChannel extends EventEmitter {
     }
 
     /*
-     * Push on the MCU: write `count` spaces. Spaces are the padding character, so the MCU ignores them as data, but they
-     * complete the 227-byte block it may be sitting on, which makes it answer a request it would otherwise hold until
-     * the next message arrives. The first bytes after a break are also dropped by the MCU, and spaces are what get dropped.
+     * Write `count` bytes of the padding character. The MCU ignores them as data, but they move where its 227-byte
+     * blocks fall relative to our messages - which decides whether it answers a request straight away or only once the
+     * next message starts arriving (see SerialBridge#_resync).
      */
     nudge (count, callback) {
         count = count || 16;
