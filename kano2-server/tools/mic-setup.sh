@@ -72,7 +72,7 @@ show_dapm() {
 
 record() { # file label dapm?
     echo "$2"
-    timeout 6 arecord -q -D "plughw:$CARD,0" -t raw -f S16_LE -r 16000 -c 2 -d 2 "$1" 2>/tmp/mic-setup.err &
+    timeout 7 arecord -q -D "plughw:$CARD,0" -t raw -f S16_LE -r 16000 -c 2 -d 3 "$1" 2>/tmp/mic-setup.err &
     local pid=$!
     [ "$3" = dapm ] && { sleep 1; show_dapm; }
     wait $pid
@@ -80,23 +80,25 @@ record() { # file label dapm?
 }
 
 echo
-record /tmp/mic-quiet.raw "STAY QUIET for 2 seconds..."
+record /tmp/mic-quiet.raw "STAY QUIET for 3 seconds..."
 sleep 1
-record /tmp/mic-noisy.raw "MAKE NOISE (clap / talk) for 2 seconds..." dapm
+record /tmp/mic-noisy.raw "MAKE NOISE (clap / talk) for 3 seconds, starting now..." dapm
 
-BOOST=$BOOST python3 - /tmp/mic-quiet.raw /tmp/mic-noisy.raw <<'PY'
+BOOST=$BOOST BOOST=$BOOST python3 - /tmp/mic-quiet.raw /tmp/mic-noisy.raw <<'PY'
 import array, math, os, sys
+SKIP = 8000      # samples per channel (0.5 s at 16 kHz): the codec ADC clicks when capture starts
 
 def analyse(path):
-    if not os.path.exists(path) or os.path.getsize(path) < 3200:
+    if not os.path.exists(path) or os.path.getsize(path) < 4 * 16000:
         return None
     a = array.array('h'); a.frombytes(open(path, 'rb').read()[:os.path.getsize(path) // 4 * 4])
     best = None
     for ch in (0, 1):
         s = a[ch::2]
-        mean = sum(s) / len(s)
-        rms = math.sqrt(sum((x - mean) ** 2 for x in s) / len(s)) / 32768 * 1000
-        r = (rms, mean / 32768 * 100, max(abs(x) for x in s))
+        head, body = s[:SKIP], s[SKIP:]
+        mean = sum(body) / len(body)
+        rms = math.sqrt(sum((x - mean) ** 2 for x in body) / len(body)) / 32768 * 1000
+        r = (rms, mean / 32768 * 100, max(abs(x) for x in body), max(abs(x) for x in head))
         best = r if best is None or r[0] > best[0] else best
     return best
 
@@ -104,21 +106,22 @@ q, n = analyse(sys.argv[1]), analyse(sys.argv[2])
 print()
 if not q or not n:
     print("Recording failed - see the arecord message above."); sys.exit()
-print("                   volume (Kano scale)   DC offset   peak")
-print("  quiet            %8.1f              %6.1f%%    %5d" % (q[0], q[1], q[2]))
-print("  noise            %8.1f              %6.1f%%    %5d" % (n[0], n[1], n[2]))
+print("                   volume (Kano scale)   DC offset   peak after 0.5 s   peak in first 0.5 s")
+print("  quiet            %8.1f              %6.1f%%    %9d          %9d" % (q[0], q[1], q[2], q[3]))
+print("  noise            %8.1f              %6.1f%%    %9d          %9d" % (n[0], n[1], n[2], n[3]))
 print()
 print("The sound visualizer draws a full-height bar at volume 50; speech should land around 15-40.")
-if n[2] >= 32700:
-    b = int(os.environ.get("BOOST", "2"))
-    print("-> CLIPPING: the noise reached full scale. Lower the gain: rerun with --boost %d (each step is 3 dB)." % max(0, b - 1))
+b = int(os.environ.get("BOOST", "2"))
+if q[3] >= 32700 and q[2] < 32700:
+    print("-> The full-scale peak in the quiet recording is only in the first 0.5 s: that is the codec's start-up click. The server ignores it.")
+if q[0] > 8:
+    print("-> The quiet level is %.1f even after the click. Real room noise, or too much gain: if it stays high in a silent room, rerun with --boost %d." % (q[0], max(0, b - 1)))
+if n[0] > 60:
+    print("-> Too loud: normal talking reads %.1f. Rerun with --boost %d (each step is 3 dB)." % (n[0], max(0, b - 1)))
 elif n[0] < 8:
-    b = int(os.environ.get("BOOST", "2"))
     print("-> Quiet: the noise barely registered. Try --boost %d (each step is 3 dB), or check the DAPM lines above." % min(7, b + 1))
 else:
-    print("-> Level looks usable.")
-if q[0] > 8:
-    print("-> The quiet recording is not quiet (%.1f). That is either real room noise or too much gain; lower --boost if it persists in a silent room." % q[0])
+    print("-> Level looks usable. (A loud clap reaching full scale is normal; talking should not.)")
 if abs(q[1]) > 3:
     print("-> Large DC offset (%.1f%% of full scale): harmless, the server takes it out of the volume." % q[1])
 PY

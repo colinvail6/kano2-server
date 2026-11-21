@@ -18,6 +18,7 @@
  *   latencyMs            50 - arecord buffer; its default is ~500 ms, which delivers audio in 125 ms bursts and left
  *                        some display frames with no reading at all. 0 = use arecord's defaults.
  *   removeDcOffset       true - the codec ADC has a DC offset; it is not sound, so it is taken out of the volume
+ *   warmupMs             400 - the codec ADC makes a loud click when capture starts; that much audio is ignored
  *   channels             2 - the loudest channel is used, so it does not matter which one the mic is wired to
  *   arecordPath          '/usr/bin/arecord'
  */
@@ -58,6 +59,7 @@ class Microphone {
         this.latencyMs = mic.latencyMs !== undefined ? mic.latencyMs : 50;
         this.lowLatency = this.latencyMs > 0;
         this.removeDc = mic.removeDcOffset !== false;
+        this.warmupFrames = Math.ceil((mic.warmupMs !== undefined ? mic.warmupMs : 400) / (this.frameSamples / this.sampleRate * 1000));
         this.peak = 0;
         this.channels = mic.channels || 2;
         this.arecordPath = mic.arecordPath || '/usr/bin/arecord';
@@ -116,6 +118,7 @@ class Microphone {
         ps = spawn(this.arecordPath, args);
         let frameBytes = this.frameSamples * this.channels * 2,
             pending = Buffer.alloc(0),
+            framesSeen = 0,
             stderrText = '';
 
         this.audio = { ps: ps };
@@ -134,11 +137,15 @@ class Microphone {
         ps.stdout.on('data', (chunk) => {
             pending = Buffer.concat([pending, chunk]);
             while (pending.length >= frameBytes) {
+                let frame = pending.subarray(0, frameBytes);
+                pending = pending.subarray(frameBytes);
                 gotAudio = true;
                 this.restarts = 0;           // audio is flowing
                 this.lastError = null;
-                this.onFrame(this._volumeOf(pending.subarray(0, frameBytes)));
-                pending = pending.subarray(frameBytes);
+                if (framesSeen++ < this.warmupFrames) {
+                    continue;                // the ADC clicks when capture starts
+                }
+                this.onFrame(this._volumeOf(frame));
             }
         });
 
