@@ -1,30 +1,46 @@
 #!/bin/bash
-# Turns on the capture path of the board's Allwinner audio codec (H3-style: "H3 Audio Codec"), records two seconds
-# and prints the level. Make some noise (clap, talk) during the "RECORDING" line.
-#   sudo bash tools/mic-setup.sh [card]        # card defaults to the first capture card
-#   sudo bash tools/mic-setup.sh --save        # same, then make the mixer settings stick across reboots (alsactl store)
-# Control names come from the kernel's sun8i-codec-analog / sun4i-codec drivers. A control that does not exist on
-# this board is skipped.
+# Turns on the capture path of the board's Allwinner audio codec (H3-style: "H3 Audio Codec"), then measures a quiet
+# second-and-a-bit and a noisy one, and tells you whether the gain is right.
+#   sudo bash tools/mic-setup.sh [--boost N] [--gain N] [--save] [card]
+#     --boost N   "Mic1 Boost Volume" 0-7: 0 = off, 1 = +24 dB, then +3 dB per step   (default 2 = +27 dB)
+#     --gain N    "ADC Gain Capture Volume" 0-7: -4.5 dB + 1.5 dB per step            (default 3 = 0 dB)
+#     --save      afterwards, make the mixer settings stick across reboots (alsactl store)
+# Control names come from the kernel's sun8i-codec-analog / sun4i-codec drivers; a control this board lacks is skipped.
+# During "STAY QUIET" be silent, during "MAKE NOISE" clap or talk at normal distance.
 
-SAVE=0; [ "$1" = "--save" ] && { SAVE=1; shift; }
-CARD=${1:-$(arecord -l 2>/dev/null | sed -n 's/^card \([0-9]*\):.*/\1/p' | head -1)}
+SAVE=0; BOOST=2; GAIN=3; CARD=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --save) SAVE=1;;
+        --boost) BOOST=$2; shift;;
+        --gain) GAIN=$2; shift;;
+        [0-9]*) CARD=$1;;
+    esac
+    shift
+done
+[ -z "$CARD" ] && CARD=$(arecord -l 2>/dev/null | sed -n 's/^card \([0-9]*\):.*/\1/p' | head -1)
 [ -z "$CARD" ] && { echo "No capture card found (arecord -l). Install alsa-utils or enable the codec in the device tree."; exit 1; }
 echo "Card $CARD: $(cat /proc/asound/card$CARD/id 2>/dev/null)"
 
 exists() { amixer -c "$CARD" cget name="$1" >/dev/null 2>&1; }
+range_max() { amixer -c "$CARD" cget name="$1" | sed -n 's/.*max=\([0-9]*\).*/\1/p' | head -1; }
 
-# set a numeric control to PCT percent of its maximum
+# set a numeric control to an absolute value (clamped to its range)
+set_abs() {
+    local name="$1" val="$2" max
+    exists "$name" || { echo "  - $name: not present"; return; }
+    max=$(range_max "$name"); [ -n "$max" ] && [ "$val" -gt "$max" ] && val=$max
+    amixer -c "$CARD" cset name="$name" "$val,$val" >/dev/null 2>&1 || amixer -c "$CARD" cset name="$name" "$val" >/dev/null 2>&1
+    echo "  - $name = $val (of ${max:-?})"
+}
+
 set_pct() {
     local name="$1" pct="$2" max
     exists "$name" || { echo "  - $name: not present"; return; }
-    max=$(amixer -c "$CARD" cget name="$name" | sed -n 's/.*max=\([0-9]*\).*/\1/p' | head -1)
-    [ -z "$max" ] && { echo "  - $name: cannot read range"; return; }
-    local val=$(( (max * pct + 50) / 100 ))
-    amixer -c "$CARD" cset name="$name" "$val,$val" >/dev/null 2>&1 || amixer -c "$CARD" cset name="$name" "$val" >/dev/null 2>&1
-    echo "  - $name = $val (of $max)"
+    max=$(range_max "$name"); [ -z "$max" ] && return
+    set_abs "$name" $(( (max * pct + 50) / 100 ))
 }
 
-# set an on/off control
 set_switch() {
     local name="$1" state="$2"
     exists "$name" || { echo "  - $name: not present"; return; }
@@ -38,34 +54,9 @@ set_switch "Mic2 Capture Switch" off        # only one mic; keeps its (unconnect
 set_switch "Line In Capture Switch" off
 set_switch "Mixer Capture Switch" off
 set_switch "Mixer Reversed Capture Switch" off
-set_pct "Mic1 Boost Volume" 70
-set_pct "ADC Gain Capture Volume" 70
+set_abs "Mic1 Boost Volume" "$BOOST"
+set_abs "ADC Gain Capture Volume" "$GAIN"
 set_pct "ADC Capture Volume" 80
-
-measure() {
-    local dev="$1" rate="$2" ch="$3"
-    echo "RECORDING  -D $dev -r $rate -c $ch   (make noise now)"
-    timeout 6 arecord -q -D "$dev" -t raw -f S16_LE -r "$rate" -c "$ch" -d 2 /tmp/mic-setup.raw 2>/tmp/mic-setup.err &
-    local pid=$!
-    sleep 1; show_dapm
-    wait $pid; local rc=$?
-    local bytes; bytes=$(stat -c %s /tmp/mic-setup.raw 2>/dev/null || echo 0)
-    printf '   exit %s, %s bytes' "$rc" "$bytes"
-    if [ "$bytes" -gt 0 ] && command -v python3 >/dev/null; then
-        python3 - /tmp/mic-setup.raw "$ch" <<'PY'
-import array, math, sys
-a = array.array('h'); data = open(sys.argv[1], 'rb').read(); a.frombytes(data[:len(data) // 2 * 2])
-ch = int(sys.argv[2]); out = []
-for c in range(ch):
-    s = a[c::ch]
-    if s:
-        out.append("ch%d volume=%.1f (kano scale) peak=%d" % (c, math.sqrt(sum(x * x for x in s) / len(s)) / 32768 * 1000, max(abs(x) for x in s)))
-print("   |   " + "   ".join(out))
-PY
-    else echo; fi
-    head -c 200 /tmp/mic-setup.err | head -2 | sed 's/^/   arecord: /'
-    rm -f /tmp/mic-setup.raw /tmp/mic-setup.err
-}
 
 # DAPM state of the widgets the microphone needs, read while recording (needs debugfs)
 show_dapm() {
@@ -79,8 +70,60 @@ show_dapm() {
     [ $found = 0 ] && echo "   (no dapm info: debugfs not available)"
 }
 
+record() { # file label dapm?
+    echo "$2"
+    timeout 6 arecord -q -D "plughw:$CARD,0" -t raw -f S16_LE -r 16000 -c 2 -d 2 "$1" 2>/tmp/mic-setup.err &
+    local pid=$!
+    [ "$3" = dapm ] && { sleep 1; show_dapm; }
+    wait $pid
+    head -c 200 /tmp/mic-setup.err | head -2 | sed 's/^/   arecord: /'
+}
+
 echo
-measure "plughw:$CARD,0" 16000 2
+record /tmp/mic-quiet.raw "STAY QUIET for 2 seconds..."
+sleep 1
+record /tmp/mic-noisy.raw "MAKE NOISE (clap / talk) for 2 seconds..." dapm
+
+BOOST=$BOOST python3 - /tmp/mic-quiet.raw /tmp/mic-noisy.raw <<'PY'
+import array, math, os, sys
+
+def analyse(path):
+    if not os.path.exists(path) or os.path.getsize(path) < 3200:
+        return None
+    a = array.array('h'); a.frombytes(open(path, 'rb').read()[:os.path.getsize(path) // 4 * 4])
+    best = None
+    for ch in (0, 1):
+        s = a[ch::2]
+        mean = sum(s) / len(s)
+        rms = math.sqrt(sum((x - mean) ** 2 for x in s) / len(s)) / 32768 * 1000
+        r = (rms, mean / 32768 * 100, max(abs(x) for x in s))
+        best = r if best is None or r[0] > best[0] else best
+    return best
+
+q, n = analyse(sys.argv[1]), analyse(sys.argv[2])
+print()
+if not q or not n:
+    print("Recording failed - see the arecord message above."); sys.exit()
+print("                   volume (Kano scale)   DC offset   peak")
+print("  quiet            %8.1f              %6.1f%%    %5d" % (q[0], q[1], q[2]))
+print("  noise            %8.1f              %6.1f%%    %5d" % (n[0], n[1], n[2]))
+print()
+print("The sound visualizer draws a full-height bar at volume 50; speech should land around 15-40.")
+if n[2] >= 32700:
+    b = int(os.environ.get("BOOST", "2"))
+    print("-> CLIPPING: the noise reached full scale. Lower the gain: rerun with --boost %d (each step is 3 dB)." % max(0, b - 1))
+elif n[0] < 8:
+    b = int(os.environ.get("BOOST", "2"))
+    print("-> Quiet: the noise barely registered. Try --boost %d (each step is 3 dB), or check the DAPM lines above." % min(7, b + 1))
+else:
+    print("-> Level looks usable.")
+if q[0] > 8:
+    print("-> The quiet recording is not quiet (%.1f). That is either real room noise or too much gain; lower --boost if it persists in a silent room." % q[0])
+if abs(q[1]) > 3:
+    print("-> Large DC offset (%.1f%% of full scale): harmless, the server takes it out of the volume." % q[1])
+PY
+rm -f /tmp/mic-quiet.raw /tmp/mic-noisy.raw /tmp/mic-setup.err
+
 echo
 echo "Device-tree audio routing (what the board connects to what):"
 for f in /proc/device-tree/soc*/codec*/allwinner,audio-routing /proc/device-tree/sound*/allwinner,audio-routing; do

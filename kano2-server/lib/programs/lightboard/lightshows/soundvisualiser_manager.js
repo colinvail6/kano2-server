@@ -24,6 +24,7 @@ class SoundVisualiserManager {
 
         this.sampledVolume = 0;
         this.sampledVolumeNum = 0;
+        this.lastLevel = 0;
 
         this.buttonDownCb = this.buttonDownCallback.bind(this);
         this.buttonUpCb = this.buttonUpCallback.bind(this);
@@ -50,8 +51,12 @@ class SoundVisualiserManager {
     }
 
     _draw () {
+        // A frame that got no microphone reading keeps the previous level (0 / 0 is NaN and drew nothing)
+        let level = this.sampledVolumeNum ? this.sampledVolume / this.sampledVolumeNum : this.lastLevel;
+        this.lastLevel = level;
+
         this.waveform.shift();
-        this.waveform.push(((this.sampledVolume / this.sampledVolumeNum) / 50) * 8);
+        this.waveform.push((level / 50) * 8);
 
         this.sampledVolume = 0;
         this.sampledVolumeNum = 0;

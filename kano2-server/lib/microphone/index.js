@@ -9,11 +9,15 @@
  * and reports problems instead of staying silent.
  *
  * config.microphone (all optional except the first two, which were already there):
- *   streamBufferSize     samples per channel per volume reading (1024)
+ *   streamBufferSize     samples per volume reading at the 48 kHz of Kano's original capture (1024 = a reading every
+ *                        ~21 ms). Scaled to sampleRate here, so the cadence stays the same.
  *   rawVolumeMultiplier  volume = RMS of samples scaled to -1..1, times this (1000)
  *   device               'auto' (default: first capture card that looks like an audio codec), or an ALSA device
  *                        such as 'plughw:1,0'. The KANO_MIC_DEVICE environment variable overrides it.
  *   sampleRate           16000
+ *   latencyMs            50 - arecord buffer; its default is ~500 ms, which delivers audio in 125 ms bursts and left
+ *                        some display frames with no reading at all. 0 = use arecord's defaults.
+ *   removeDcOffset       true - the codec ADC has a DC offset; it is not sound, so it is taken out of the volume
  *   channels             2 - the loudest channel is used, so it does not matter which one the mic is wired to
  *   arecordPath          '/usr/bin/arecord'
  */
@@ -47,10 +51,14 @@ class Microphone {
         let mic = config.microphone || {};
 
         this.config = config;
-        this.frameSamples = mic.streamBufferSize || 1024;
         this.multiplier = mic.rawVolumeMultiplier !== undefined ? mic.rawVolumeMultiplier : 1000;
         this.deviceSetting = process.env.KANO_MIC_DEVICE || mic.device || 'auto';
         this.sampleRate = mic.sampleRate || 16000;
+        this.frameSamples = Math.max(64, Math.round((mic.streamBufferSize || 1024) * this.sampleRate / 48000));
+        this.latencyMs = mic.latencyMs !== undefined ? mic.latencyMs : 50;
+        this.lowLatency = this.latencyMs > 0;
+        this.removeDc = mic.removeDcOffset !== false;
+        this.peak = 0;
         this.channels = mic.channels || 2;
         this.arecordPath = mic.arecordPath || '/usr/bin/arecord';
 
@@ -98,8 +106,15 @@ class Microphone {
 
     _spawn (device) {
         let args = ['-q', '-D', device, '-t', 'raw', '-f', 'S16_LE', '-r', String(this.sampleRate), '-c', String(this.channels)],
-            ps = spawn(this.arecordPath, args),
-            frameBytes = this.frameSamples * this.channels * 2,
+            lowLatency = this.lowLatency,
+            gotAudio = false,
+            ps;
+
+        if (lowLatency) {
+            args.push(`--buffer-time=${this.latencyMs * 1000}`, `--period-time=${Math.round(this.latencyMs * 200)}`);
+        }
+        ps = spawn(this.arecordPath, args);
+        let frameBytes = this.frameSamples * this.channels * 2,
             pending = Buffer.alloc(0),
             stderrText = '';
 
@@ -119,6 +134,7 @@ class Microphone {
         ps.stdout.on('data', (chunk) => {
             pending = Buffer.concat([pending, chunk]);
             while (pending.length >= frameBytes) {
+                gotAudio = true;
                 this.restarts = 0;           // audio is flowing
                 this.lastError = null;
                 this.onFrame(this._volumeOf(pending.subarray(0, frameBytes)));
@@ -127,6 +143,13 @@ class Microphone {
         });
 
         ps.on('exit', (code) => {
+            if (lowLatency && !gotAudio && this.audio && this.audio.ps === ps && this.wanted) {
+                // Some devices refuse the small buffer: fall back to arecord's own defaults and go again at once
+                console.log('Microphone: arecord rejected the low-latency buffer settings, using its defaults');
+                this.lowLatency = false;
+                this.audio = null;
+                return this._spawn(device);
+            }
             if (this.audio && this.audio.ps === ps) {
                 this._fail(`arecord (${args.join(' ')}) exited with ${code}: ${stderrText.trim().split('\n')[0] || 'no message'}`);
             }
@@ -134,19 +157,32 @@ class Microphone {
         });
     }
 
-    /* The loudest channel's RMS, samples scaled to -1..1, times the multiplier. */
+    /* The loudest channel's RMS, samples scaled to -1..1 (DC offset removed), times the multiplier. */
     _volumeOf (frame) {
-        let loudest = 0;
+        let loudest = 0,
+            peak = 0;
 
         for (let c = 0; c < this.channels; c++) {
-            let sum = 0;
+            let samples = new Float32Array(this.frameSamples),
+                mean = 0,
+                sum = 0;
+
             for (let i = 0; i < this.frameSamples; i++) {
                 let s = frame.readInt16LE((i * this.channels + c) * 2) / 32768;
+                samples[i] = s;
+                mean += s;
+                peak = Math.max(peak, Math.abs(s));
+            }
+            mean = this.removeDc ? mean / this.frameSamples : 0;
+
+            for (let i = 0; i < this.frameSamples; i++) {
+                let s = samples[i] - mean;
                 sum += s * s;
             }
             loudest = Math.max(loudest, Math.sqrt(sum / this.frameSamples));
         }
 
+        this.peak = peak;   // 1.0 = the ADC is clipping
         return loudest * this.multiplier;
     }
 
